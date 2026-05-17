@@ -17,7 +17,9 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Slider;
+import javafx.scene.control.TextField;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
@@ -48,6 +50,7 @@ public class MainApp extends Application {
     private final PhongMaterial meshMaterial = new PhongMaterial();
     private final MeshView meshView = new MeshView();
     private final ComboBox<String> sdfShapeBox = new ComboBox<>();
+    private final ComboBox<MeshingMethod> meshingMethodBox = new ComboBox<>();
     private final ComboBox<NormalMode> normalModeBox = new ComboBox<>();
     private final ComboBox<UvGenerator.Mode> uvModeBox = new ComboBox<>();
     private final Slider gridResolutionSlider = new Slider(8.0, 96.0, 32.0);
@@ -73,12 +76,17 @@ public class MainApp extends Application {
     private final CheckBox applyTextureCheckBox = new CheckBox("Apply texture");
     private final Label shapeDescriptionLabel = new Label();
     private final Label texturePathLabel = new Label();
+    private final TextField rawSdfPathField = new TextField();
+    private final TextField rawSdfDimensionsField = new TextField("64,64,64");
+    private final Label rawSdfStatusLabel = new Label();
     private final Label statusLabel = new Label();
 
     private Sdf activeSdf;
     private File textureFile = findDefaultTextureFile();
+    private File rawSdfFile;
     private Image generatedTextureImage;
     private boolean usingGeneratedTexture;
+    private boolean rawSdfSourceActive;
 
     @Override
     public void start(Stage stage) {
@@ -128,9 +136,12 @@ public class MainApp extends Application {
     private ScrollPane createControls(Stage stage) {
         sdfShapeBox.getItems().addAll(
                 "Sphere",
+                "GridBasedSphere",
                 "RotatedCube",
+                "GridBasedRotatedCube",
                 "Pyramid",
                 "Torus",
+                "GridBasedTorus",
                 "ThinRotatedBox",
                 "BoxMinusSphere",
                 "DoubleTorusOrUnion",
@@ -140,7 +151,14 @@ public class MainApp extends Application {
         shapeDescriptionLabel.setMinHeight(80.0);
         shapeDescriptionLabel.setStyle("-fx-text-fill: #3b4652;");
         updateShapeDescription();
-        sdfShapeBox.valueProperty().addListener((observable, oldValue, newValue) -> updateShapeDescription());
+        sdfShapeBox.valueProperty().addListener((observable, oldValue, newValue) -> {
+            updateShapeDescription();
+            clearRawSdfSource();
+        });
+
+        meshingMethodBox.getItems().addAll(MeshingMethod.DUAL_CONTOURING, MeshingMethod.SURFACE_NETS);
+        meshingMethodBox.getSelectionModel().select(MeshingMethod.DUAL_CONTOURING);
+        meshingMethodBox.valueProperty().addListener((observable, oldValue, newValue) -> updateMeshingMethodControls());
 
         normalModeBox.getItems().addAll(NormalMode.FLAT, NormalMode.SDF_GRADIENT, NormalMode.AUTO_SMOOTH);
         normalModeBox.getSelectionModel().select(NormalMode.AUTO_SMOOTH);
@@ -231,6 +249,23 @@ public class MainApp extends Application {
         checkerboardButton.setMaxWidth(Double.MAX_VALUE);
         checkerboardButton.setOnAction(event -> useGeneratedCheckerboardTexture());
 
+        Button chooseRawSdfButton = new Button("Browse Raw SDF");
+        chooseRawSdfButton.setMaxWidth(Double.MAX_VALUE);
+        chooseRawSdfButton.setOnAction(event -> chooseRawSdf(stage));
+
+        Button loadRawSdfButton = new Button("Load Raw SDF");
+        loadRawSdfButton.setMaxWidth(Double.MAX_VALUE);
+        loadRawSdfButton.setOnAction(event -> activateRawSdfAndRebuild());
+
+        Button clearRawSdfButton = new Button("Use Procedural Shape");
+        clearRawSdfButton.setMaxWidth(Double.MAX_VALUE);
+        clearRawSdfButton.setOnAction(event -> clearRawSdfAndRebuild());
+
+        HBox rawSdfButtonRow = new HBox(6.0, chooseRawSdfButton, loadRawSdfButton);
+        rawSdfButtonRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(chooseRawSdfButton, Priority.ALWAYS);
+        HBox.setHgrow(loadRawSdfButton, Priority.ALWAYS);
+
         binarySearchCheckBox.setSelected(true);
         useMassPointFallbackCheckBox.setSelected(true);
         wireframeCheckBox.selectedProperty().addListener((observable, oldValue, selected) -> updateDrawMode());
@@ -240,10 +275,23 @@ public class MainApp extends Application {
         texturePathLabel.setStyle("-fx-text-fill: #3b4652;");
         updateTexturePathLabel();
 
+        rawSdfPathField.setPromptText("path/to/volume.raw");
+        rawSdfDimensionsField.setPromptText("64,64,64");
+        rawSdfStatusLabel.setWrapText(true);
+        rawSdfStatusLabel.setStyle("-fx-text-fill: #3b4652;");
+        rawSdfStatusLabel.setText("No raw SDF loaded");
+
+        Label rawSdfFormatLabel = new Label(
+                "Raw file: float32 little-endian, x-fastest. Grid-based shapes also use these dimensions.");
+        rawSdfFormatLabel.setWrapText(true);
+        rawSdfFormatLabel.setStyle("-fx-text-fill: #5c6670;");
+
         VBox controls = new VBox(10.0,
                 new Label("SDF Shape"),
                 sdfShapeBox,
                 shapeDescriptionLabel,
+                new Label("Meshing Method"),
+                meshingMethodBox,
                 new Label("Grid Resolution"),
                 resolutionValue,
                 gridResolutionSlider,
@@ -289,6 +337,14 @@ public class MainApp extends Application {
                 new Label("Projection Strength"),
                 projectionStrengthValue,
                 projectionStrengthSlider,
+                new Label("Raw SDF Path"),
+                rawSdfPathField,
+                new Label("Raw/Grid SDF Dimensions"),
+                rawSdfDimensionsField,
+                rawSdfFormatLabel,
+                rawSdfButtonRow,
+                clearRawSdfButton,
+                rawSdfStatusLabel,
                 rebuildButton,
                 statusLabel);
         controls.setAlignment(Pos.TOP_LEFT);
@@ -299,8 +355,11 @@ public class MainApp extends Application {
         VBox.setVgrow(statusLabel, Priority.ALWAYS);
 
         sdfShapeBox.setMaxWidth(Double.MAX_VALUE);
+        meshingMethodBox.setMaxWidth(Double.MAX_VALUE);
         normalModeBox.setMaxWidth(Double.MAX_VALUE);
         uvModeBox.setMaxWidth(Double.MAX_VALUE);
+        rawSdfPathField.setMaxWidth(Double.MAX_VALUE);
+        rawSdfDimensionsField.setMaxWidth(Double.MAX_VALUE);
         gridResolutionSlider.setMaxWidth(Double.MAX_VALUE);
         rotationAngleSlider.setMaxWidth(Double.MAX_VALUE);
         autoSmoothAngleSlider.setMaxWidth(Double.MAX_VALUE);
@@ -311,6 +370,7 @@ public class MainApp extends Application {
         projectionIterationsSlider.setMaxWidth(Double.MAX_VALUE);
         maxProjectionStepSlider.setMaxWidth(Double.MAX_VALUE);
         projectionStrengthSlider.setMaxWidth(Double.MAX_VALUE);
+        updateMeshingMethodControls();
 
         ScrollPane scrollPane = new ScrollPane(controls);
         scrollPane.setFitToWidth(true);
@@ -354,10 +414,60 @@ public class MainApp extends Application {
     }
 
     private void rebuildMesh() {
-        activeSdf = createSelectedSdf();
-        int resolution = (int) Math.round(gridResolutionSlider.getValue());
-        MeshData meshData = DualContouring.generate(
-                activeSdf,
+        try {
+            activeSdf = createSelectedSdf();
+            int resolution = (int) Math.round(gridResolutionSlider.getValue());
+            MeshingMethod meshingMethod = getSelectedMeshingMethod();
+            MeshData meshData = generateMeshData(activeSdf, resolution, meshingMethod);
+
+            meshView.setMesh(MeshBuilder.build(
+                    meshData,
+                    activeSdf,
+                    normalModeBox.getSelectionModel().getSelectedItem(),
+                    autoSmoothAngleSlider.getValue(),
+                    uvModeBox.getSelectionModel().getSelectedItem()));
+            updateDrawMode();
+
+            double sampleAtOrigin = activeSdf.eval(Vec3.zero());
+            statusLabel.setText(String.format(
+                    "Source: %s%nMethod: %s%nSDF(0,0,0): %.4f%nGrid: %d%nDomain: [%.1f, %.1f]^3%nActive cells: %d%nVertices: %d%nTriangles: %d%n%s%nProjected: %d%nAvg |SDF| before: %.6f%nAvg |SDF| after: %.6f%nBuild: %d ms",
+                    getActiveSourceLabel(),
+                    meshingMethod,
+                    sampleAtOrigin,
+                    resolution,
+                    GRID_DOMAIN_MIN,
+                    GRID_DOMAIN_MAX,
+                    meshData.getActiveCellCount(),
+                    meshData.getVertices().size(),
+                    meshData.getTriangles().size(),
+                    formatPlacementStats(meshData, meshingMethod),
+                    meshData.getProjectedVertexCount(),
+                    meshData.getAverageAbsSdfBeforeProjection(),
+                    meshData.getAverageAbsSdfAfterProjection(),
+                    meshData.getBuildTimeMillis()));
+        } catch (RuntimeException exception) {
+            statusLabel.setText("Build failed: " + exception.getMessage());
+            if (rawSdfSourceActive) {
+                rawSdfStatusLabel.setText("Raw SDF load failed: " + exception.getMessage());
+            }
+        }
+    }
+
+    private MeshData generateMeshData(Sdf sdf, int resolution, MeshingMethod meshingMethod) {
+        if (meshingMethod == MeshingMethod.SURFACE_NETS) {
+            return SurfaceNets.generate(
+                    sdf,
+                    resolution,
+                    binarySearchCheckBox.isSelected(),
+                    flipWindingCheckBox.isSelected(),
+                    enableSurfaceProjectionCheckBox.isSelected(),
+                    (int) Math.round(projectionIterationsSlider.getValue()),
+                    maxProjectionStepSlider.getValue(),
+                    projectionStrengthSlider.getValue());
+        }
+
+        return DualContouring.generate(
+                sdf,
                 resolution,
                 binarySearchCheckBox.isSelected(),
                 flipWindingCheckBox.isSelected(),
@@ -370,47 +480,60 @@ public class MainApp extends Application {
                 (int) Math.round(projectionIterationsSlider.getValue()),
                 maxProjectionStepSlider.getValue(),
                 projectionStrengthSlider.getValue());
+    }
 
-        meshView.setMesh(MeshBuilder.build(
-                meshData,
-                activeSdf,
-                normalModeBox.getSelectionModel().getSelectedItem(),
-                autoSmoothAngleSlider.getValue(),
-                uvModeBox.getSelectionModel().getSelectedItem()));
-        updateDrawMode();
+    private String formatPlacementStats(MeshData meshData, MeshingMethod meshingMethod) {
+        if (meshingMethod == MeshingMethod.SURFACE_NETS) {
+            return "QEF stats: N/A (Surface Nets average edge crossings)";
+        }
 
-        double sampleAtOrigin = activeSdf.eval(Vec3.zero());
-        statusLabel.setText(String.format(
-                "SDF(0,0,0): %.4f%nGrid: %d%nDomain: [%.1f, %.1f]^3%nActive cells: %d%nVertices: %d%nTriangles: %d%nQEF solved: %d%nMass fallback: %d%nHard clamps: %d%nSlack clamps: %d%nAvg QEF error: %.6f%nProjected: %d%nAvg |SDF| before: %.6f%nAvg |SDF| after: %.6f%nBuild: %d ms",
-                sampleAtOrigin,
-                resolution,
-                GRID_DOMAIN_MIN,
-                GRID_DOMAIN_MAX,
-                meshData.getActiveCellCount(),
-                meshData.getVertices().size(),
-                meshData.getTriangles().size(),
+        return String.format(
+                "QEF solved: %d%nMass fallback: %d%nHard clamps: %d%nSlack clamps: %d%nAvg QEF error: %.6f",
                 meshData.getQefSolvedCount(),
                 meshData.getMassFallbackCount(),
                 meshData.getHardClampCount(),
                 meshData.getSlackClampCount(),
-                meshData.getAverageQefError(),
-                meshData.getProjectedVertexCount(),
-                meshData.getAverageAbsSdfBeforeProjection(),
-                meshData.getAverageAbsSdfAfterProjection(),
-                meshData.getBuildTimeMillis()));
+                meshData.getAverageQefError());
+    }
+
+    private MeshingMethod getSelectedMeshingMethod() {
+        MeshingMethod selected = meshingMethodBox.getSelectionModel().getSelectedItem();
+        return selected == null ? MeshingMethod.DUAL_CONTOURING : selected;
+    }
+
+    private void updateMeshingMethodControls() {
+        boolean qefControlsEnabled = getSelectedMeshingMethod() == MeshingMethod.DUAL_CONTOURING;
+        qefCenterBiasSlider.setDisable(!qefControlsEnabled);
+        vertexSlackSlider.setDisable(!qefControlsEnabled);
+        qefErrorFallbackThresholdSlider.setDisable(!qefControlsEnabled);
+        hardClampToCellCheckBox.setDisable(!qefControlsEnabled);
+        useMassPointFallbackCheckBox.setDisable(!qefControlsEnabled);
     }
 
     private Sdf createSelectedSdf() {
+        if (rawSdfSourceActive) {
+            return loadRawSdfFromFields();
+        }
+
         String shape = sdfShapeBox.getSelectionModel().getSelectedItem();
         double angleRadians = Math.toRadians(rotationAngleSlider.getValue());
+        if ("GridBasedSphere".equals(shape)) {
+            return createGridSampledSdf(SdfLibrary.sphere(0.75));
+        }
         if ("RotatedCube".equals(shape)) {
             return SdfLibrary.rotatedCube(angleRadians);
+        }
+        if ("GridBasedRotatedCube".equals(shape)) {
+            return createGridSampledSdf(SdfLibrary.rotatedCube(angleRadians));
         }
         if ("Pyramid".equals(shape)) {
             return SdfLibrary.pyramid(1.3, 0.75);
         }
         if ("Torus".equals(shape)) {
             return SdfLibrary.torus(0.55, 0.22);
+        }
+        if ("GridBasedTorus".equals(shape)) {
+            return createGridSampledSdf(SdfLibrary.torus(0.55, 0.22));
         }
         if ("ThinRotatedBox".equals(shape)) {
             return SdfLibrary.thinRotatedBox(angleRadians);
@@ -427,6 +550,17 @@ public class MainApp extends Application {
         return SdfLibrary.sphere(0.75);
     }
 
+    private Sdf createGridSampledSdf(Sdf sourceSdf) {
+        RawDimensions dimensions = parseRawDimensions(rawSdfDimensionsField.getText());
+        return RawSdfVolume.sample(
+                sourceSdf,
+                dimensions.sizeX,
+                dimensions.sizeY,
+                dimensions.sizeZ,
+                GRID_DOMAIN_MIN,
+                GRID_DOMAIN_MAX);
+    }
+
     private void updateShapeDescription() {
         shapeDescriptionLabel.setText(describeShape(sdfShapeBox.getSelectionModel().getSelectedItem()));
     }
@@ -435,11 +569,20 @@ public class MainApp extends Application {
         if ("RotatedCube".equals(shape)) {
             return "Rotated cube, half extents (0.65, 0.65, 0.65), rotated around Y and X by the UI angle. Tests grid misalignment and sharp edges.";
         }
+        if ("GridBasedRotatedCube".equals(shape)) {
+            return "Grid-sampled rotated cube: the same rotated cube is first baked into a float32-style voxel SDF, then evaluated only through trilinear grid sampling.";
+        }
         if ("Pyramid".equals(shape)) {
             return "Square-base pyramid centered at origin. Tests the apex and slanted sharp ridges.";
         }
         if ("Torus".equals(shape)) {
             return "Smooth torus, major 0.55 and minor 0.22. Tests Hermite normals, curved features, and surface projection.";
+        }
+        if ("GridBasedTorus".equals(shape)) {
+            return "Grid-sampled torus: the analytic torus is baked into the Raw/Grid SDF dimensions, then queried through trilinear voxel sampling.";
+        }
+        if ("GridBasedSphere".equals(shape)) {
+            return "Grid-sampled sphere: the analytic sphere is baked into the Raw/Grid SDF dimensions, then queried through trilinear voxel sampling.";
         }
         if ("ThinRotatedBox".equals(shape)) {
             return "Thin rotated box, half extents (0.85, 0.12, 0.55), with UI Y rotation plus 17 deg Z rotation. Tests thin features and grid-edge misses.";
@@ -454,6 +597,128 @@ public class MainApp extends Application {
             return "Union of a cube base and pyramid top. Tests the sharp crease between primitives and non-smooth CSG gradients.";
         }
         return "Baseline sphere centered at origin. Useful for checking basic sampling, winding, and smooth normals.";
+    }
+
+    private void chooseRawSdf(Stage stage) {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Choose Raw SDF Volume");
+        fileChooser.getExtensionFilters().addAll(
+                new FileChooser.ExtensionFilter("Raw/Binary Files", "*.raw", "*.bin", "*.sdf"),
+                new FileChooser.ExtensionFilter("All Files", "*.*"));
+
+        File initialDirectory = getRawSdfInitialDirectory();
+        if (initialDirectory != null) {
+            fileChooser.setInitialDirectory(initialDirectory);
+        }
+
+        File selectedFile = fileChooser.showOpenDialog(stage);
+        if (selectedFile != null) {
+            rawSdfPathField.setText(selectedFile.getPath());
+            activateRawSdfAndRebuild();
+        }
+    }
+
+    private void activateRawSdfAndRebuild() {
+        rawSdfSourceActive = true;
+        shapeDescriptionLabel.setText("Raw float32 SDF volume active. Select a procedural shape to clear the raw path.");
+        rebuildMesh();
+    }
+
+    private void clearRawSdfAndRebuild() {
+        clearRawSdfSource();
+        rebuildMesh();
+    }
+
+    private void clearRawSdfSource() {
+        rawSdfSourceActive = false;
+        rawSdfFile = null;
+        rawSdfPathField.clear();
+        rawSdfStatusLabel.setText("No raw SDF loaded");
+        updateShapeDescription();
+    }
+
+    private RawSdfVolume loadRawSdfFromFields() {
+        String rawPath = rawSdfPathField.getText() == null ? "" : rawSdfPathField.getText().trim();
+        if (rawPath.isEmpty()) {
+            throw new IllegalArgumentException("Raw SDF path is empty.");
+        }
+
+        File file = resolvePath(rawPath);
+        RawDimensions dimensions = parseRawDimensions(rawSdfDimensionsField.getText());
+        RawSdfVolume volume = RawSdfVolume.load(
+                file,
+                dimensions.sizeX,
+                dimensions.sizeY,
+                dimensions.sizeZ,
+                GRID_DOMAIN_MIN,
+                GRID_DOMAIN_MAX);
+
+        rawSdfFile = file;
+        rawSdfPathField.setText(file.getPath());
+        rawSdfStatusLabel.setText(String.format(
+                "Raw active: %s%nDimensions: %dx%dx%d",
+                file.getName(),
+                volume.getSizeX(),
+                volume.getSizeY(),
+                volume.getSizeZ()));
+        shapeDescriptionLabel.setText("Raw float32 SDF volume active. Select a procedural shape to clear the raw path.");
+        return volume;
+    }
+
+    private String getActiveSourceLabel() {
+        if (rawSdfSourceActive && rawSdfFile != null) {
+            return "Raw SDF " + rawSdfFile.getName();
+        }
+        return String.valueOf(sdfShapeBox.getSelectionModel().getSelectedItem());
+    }
+
+    private File getRawSdfInitialDirectory() {
+        if (rawSdfFile != null && rawSdfFile.getParentFile() != null && rawSdfFile.getParentFile().isDirectory()) {
+            return rawSdfFile.getParentFile();
+        }
+
+        String rawPath = rawSdfPathField.getText() == null ? "" : rawSdfPathField.getText().trim();
+        if (!rawPath.isEmpty()) {
+            File candidate = resolvePath(rawPath);
+            File parent = candidate.isDirectory() ? candidate : candidate.getParentFile();
+            if (parent != null && parent.isDirectory()) {
+                return parent;
+            }
+        }
+
+        return null;
+    }
+
+    private RawDimensions parseRawDimensions(String text) {
+        String value = text == null || text.trim().isEmpty() ? "64,64,64" : text.trim();
+        String[] parts = value.split("[,xX\\s]+");
+        if (parts.length != 1 && parts.length != 3) {
+            throw new IllegalArgumentException("Raw dimensions must be one value or three values, such as 64 or 64,64,64.");
+        }
+
+        int sizeX = parsePositiveDimension(parts[0]);
+        int sizeY = parts.length == 1 ? sizeX : parsePositiveDimension(parts[1]);
+        int sizeZ = parts.length == 1 ? sizeX : parsePositiveDimension(parts[2]);
+        return new RawDimensions(sizeX, sizeY, sizeZ);
+    }
+
+    private int parsePositiveDimension(String text) {
+        try {
+            int value = Integer.parseInt(text);
+            if (value < 2) {
+                throw new IllegalArgumentException("Raw dimensions must all be at least 2.");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("Raw dimensions must be integers.", exception);
+        }
+    }
+
+    private File resolvePath(String path) {
+        if (path.startsWith("~/")) {
+            return new File(System.getProperty("user.home") + path.substring(1));
+        }
+        return new File(path);
     }
 
     private void updateDrawMode() {
@@ -593,6 +858,18 @@ public class MainApp extends Application {
         }
 
         return local;
+    }
+
+    private static final class RawDimensions {
+        private final int sizeX;
+        private final int sizeY;
+        private final int sizeZ;
+
+        private RawDimensions(int sizeX, int sizeY, int sizeZ) {
+            this.sizeX = sizeX;
+            this.sizeY = sizeY;
+            this.sizeZ = sizeZ;
+        }
     }
 
     public static void main(String[] args) {
